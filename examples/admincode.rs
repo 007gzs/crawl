@@ -224,7 +224,7 @@ impl CrawlerBase {
                 None=>{},
                 Some(h)=>{
                     let new_url = base_url.join(&h)?;
-                    downloader.crawl(new_url.to_string(), &CrawlerData{base:CrawlerBase::new(self.year, &code, &short_name)}, false).await?;
+                    downloader.crawl(new_url.to_string(), &mut CrawlerData{base:CrawlerBase::new(self.year, &code, &short_name)}, false).await?;
                 }
             }
         }
