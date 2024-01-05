@@ -3,29 +3,29 @@ use std::io::{Write, Read};
 use bytes::Bytes;
 use tokio::task::JoinHandle;
 use std::fs;
-use std::error::Error as StdError;  
+use anyhow;  
 use std::path::Path;
 use std::time::Duration;
 use async_trait::async_trait;
 use reqwest;
 use tokio::time::sleep;
 
-#[async_trait]
-pub trait GetProxy {
-    async fn get_proxy(&self) -> Result<Option<reqwest::Proxy>, Box<dyn StdError + Send + Sync>>;
+#[async_trait(?Send)]
+pub trait GetProxy: Send + Sync {
+    async fn get_proxy(&self) -> anyhow::Result<Option<reqwest::Proxy>>;
 }
 pub struct Downloader<T>
 {
     root_path: String,
     base_url: String,
     get_proxy: Option<Box<dyn GetProxy>>,
-    tasks: Vec<JoinHandle<Result<(), Box<dyn StdError + Send + Sync>>>>,
+    tasks: Vec<JoinHandle<anyhow::Result<()>>>,
     pub args:T
 }
 
 #[async_trait(?Send)]
-pub trait Crawler<T> {
-    async fn parse(&self, downloader:&mut Downloader<T>, url:String, data:Option<Bytes>) -> Result<(), Box<dyn StdError + Send + Sync>>;
+pub trait Crawler<T>: Send + Sync {
+    async fn parse(&self, downloader:&mut Downloader<T>, url:String, data:Option<Bytes>) -> anyhow::Result<()>;
 }
 
 impl<T: std::marker::Send>  Downloader<T>
@@ -33,7 +33,7 @@ impl<T: std::marker::Send>  Downloader<T>
     pub fn new(root_path: String, base_url: String, get_proxy:Option<Box<dyn GetProxy>>, args:T) -> Downloader<T/*, ProxyCallback, ProxyFut */>{
         Downloader{root_path: root_path, base_url: base_url, get_proxy: get_proxy, args:args, tasks:Vec::new()}
     }
-    async fn get_proxy(&self) -> Result<Option<reqwest::Proxy>, Box<dyn StdError>>{
+    async fn get_proxy(&self) -> anyhow::Result<Option<reqwest::Proxy>>{
         match &self.get_proxy{
             None => Ok(None),
             Some(t) => {
@@ -41,7 +41,7 @@ impl<T: std::marker::Send>  Downloader<T>
             }
         }
     }
-    async fn connect_real(&self, url:String, proxy:Option<reqwest::Proxy>) -> Result<Bytes, reqwest::Error>{
+    async fn connect_real(&self, url:String, proxy:Option<reqwest::Proxy>) -> anyhow::Result<Bytes>{
         let mut builder = reqwest::Client::builder();
         match proxy {
             Some(p)=>{
@@ -54,7 +54,7 @@ impl<T: std::marker::Send>  Downloader<T>
         Ok(body)
     }
     
-    async fn download(&self, url:String, force:bool) -> Result<Option<Bytes>, Box<dyn StdError + Send + Sync>>{
+    async fn download(&self, url:String, force:bool) -> anyhow::Result<Option<Bytes>>{
         if url.len() < self.base_url.len() || url[0..self.base_url.len()] != self.base_url{
             return Ok(None);
         }
@@ -93,7 +93,7 @@ impl<T: std::marker::Send>  Downloader<T>
         }
         Ok(None)
     }
-    async fn crawl(&mut self, url:String, callback: &(dyn Crawler<T> + Send + Sync), force:bool)-> Result<(), Box<dyn StdError + Send + Sync>> {
+    async fn crawl(&mut self, url:String, callback: &(dyn Crawler<T> + Send + Sync), force:bool)-> anyhow::Result<()> {
         let data = self.download(url.clone(), force).await?;
         callback.parse(self, url, data).await?;
         Ok(())
@@ -101,7 +101,7 @@ impl<T: std::marker::Send>  Downloader<T>
     pub fn start(&mut self, url:String, callback: &(dyn Crawler<T> + Send + Sync), force:bool){
         self.tasks.push(tokio::spawn(self.crawl(url, callback, force)));
     }
-    pub async fn wait(&mut self)-> Result<(), Box<dyn StdError>>{
+    pub async fn wait(&mut self)-> anyhow::Result<()>{
         loop{
             match self.tasks.pop(){
                 Some(handle) => handle.await?,

@@ -1,4 +1,3 @@
-use std::error::Error as StdError;
 use std::fs::File;  
 use std::io::Write;
 use std::fmt::{self, Display, Formatter};
@@ -156,7 +155,7 @@ struct GetCnProxy{
 }
 #[async_trait]
 impl GetProxy for GetCnProxy{
-    async fn get_proxy(&self) -> Result<Option<reqwest::Proxy>, Box<dyn StdError>>{
+    async fn get_proxy(&self) -> anyhow::Result<Option<reqwest::Proxy>>{
         let body = reqwest::get(self.proxy_url.clone()).await?.text().await?;
         let proxy = reqwest::Proxy::http(format!("http://{}", body))?;
         Ok(Some(proxy))

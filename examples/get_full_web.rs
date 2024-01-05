@@ -1,4 +1,3 @@
-use std::error::Error as StdError;
 use async_trait::async_trait;
 use crawl::downloader::{Downloader, Crawler};
 use futures::Future;
@@ -8,6 +7,7 @@ use url::Url;
 use bytes::Bytes;
 use encoding_rs::UTF_8;
 use std::collections::HashSet;
+use anyhow;
 
 struct Data{
     title: String,
@@ -34,7 +34,7 @@ fn decode_bytes(data:&Bytes) -> String{
 }
 #[async_trait(?Send)]
 impl Crawler<Manager> for CrawlerData{
-    async fn parse(&self, downloader:&mut Downloader<Manager>, url:String, data:Option<Bytes>) -> Result<(), Box<dyn StdError>> {
+    async fn parse(&self, downloader:&mut Downloader<Manager>, url:String, data:Option<Bytes>) -> anyhow::Result<()> {
         let d;
         match data {
             Some(v) => d = decode_bytes(&v),
@@ -67,7 +67,7 @@ impl Crawler<Manager> for CrawlerData{
 }
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn StdError>> {
+async fn main() -> anyhow::Result<()> {
     let mut download = Downloader::new(
         String::from(r"data/book"),
         String::from("https://doc.rust-lang.org/book/"),
