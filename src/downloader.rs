@@ -11,7 +11,7 @@ use reqwest;
 use tokio::time::sleep;
 
 #[async_trait(?Send)]
-pub trait GetProxy: Send + Sync {
+pub trait GetProxy: Send + Sync + 'static  {
     async fn get_proxy(&self) -> anyhow::Result<Option<reqwest::Proxy>>;
 }
 pub struct Downloader<T>
@@ -24,11 +24,11 @@ pub struct Downloader<T>
 }
 
 #[async_trait(?Send)]
-pub trait Crawler<T>: Send + Sync {
+pub trait Crawler<T>: Send + Sync + 'static  {
     async fn parse(&self, downloader:&mut Downloader<T>, url:String, data:Option<Bytes>) -> anyhow::Result<()>;
 }
 
-impl<T: std::marker::Send>  Downloader<T>
+impl<T: std::marker::Send + std::marker::Sync + 'static >  Downloader<T>
 {
     pub fn new(root_path: String, base_url: String, get_proxy:Option<Box<dyn GetProxy>>, args:T) -> Downloader<T/*, ProxyCallback, ProxyFut */>{
         Downloader{root_path: root_path, base_url: base_url, get_proxy: get_proxy, args:args, tasks:Vec::new()}
