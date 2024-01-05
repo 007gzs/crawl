@@ -1,6 +1,7 @@
 use std::error::Error as StdError;
 use async_trait::async_trait;
 use crawl::downloader::{Downloader, Crawler};
+use futures::Future;
 use select::predicate::Name;
 use select::document::Document;
 use url::Url;
@@ -22,7 +23,7 @@ impl Data{
 }
 struct Manager{
     datas: Vec<Data>,
-    added_urls: HashSet<String>
+    added_urls: HashSet<String>,
 }
 
 struct CrawlerData;
@@ -55,7 +56,7 @@ impl Crawler<Manager> for CrawlerData{
                     let new_url = base_url.join(no_hash)?.to_string();
                     if !downloader.args.added_urls.contains(&new_url){
                         downloader.args.added_urls.insert(new_url.clone());
-                        downloader.crawl(new_url,self, false).await?;
+                        downloader.start(new_url,self, false);
                     }
                     
                 }
@@ -75,7 +76,8 @@ async fn main() -> Result<(), Box<dyn StdError>> {
     );
     let url = String::from("https://doc.rust-lang.org/book/index.html");
     download.args.added_urls.insert(url.clone());
-    download.crawl(url, &CrawlerData{}, false).await?;
+    download.start(url, &CrawlerData{}, false);
+    download.wait().await?;
     println!("finish {}", download.args.datas.len());
     for item in download.args.datas.iter(){
         println!("{} {}", item.url, item.title);

@@ -224,7 +224,7 @@ impl CrawlerBase {
                 None=>{},
                 Some(h)=>{
                     let new_url = base_url.join(&h)?;
-                    downloader.crawl(new_url.to_string(), &mut CrawlerData{base:CrawlerBase::new(self.year, &code, &short_name)}, false).await?;
+                    downloader.start(new_url.to_string(), &mut CrawlerData{base:CrawlerBase::new(self.year, &code, &short_name)}, false);
                 }
             }
         }
@@ -252,7 +252,7 @@ impl Crawler<Vec<AdminCode>> for CrawlerData{
             Some(v) => match decode_bytes(&v){
                 Some(text) => d = text,
                 None => {
-                    downloader.crawl(url, self, true).await?;
+                    downloader.start(url, self, true);
                     return Ok(());
                 }
             },
@@ -275,7 +275,7 @@ impl Crawler<Vec<AdminCode>> for CrawlerRoot{
             Some(v) => match decode_bytes(&v){
                 Some(text) => d = text,
                 None => {
-                    downloader.crawl(url, self, true).await?;
+                    downloader.start(url, self, true);
                     return Ok(());
                 }
             },
@@ -296,7 +296,7 @@ impl Crawler<Vec<AdminCode>> for CrawlerRoot{
             downloader.args.push(admin_code);
             let new_url = base_url.join(href)?;
 
-            downloader.crawl(new_url.to_string(), &CrawlerData{base:CrawlerBase::new(self.base.year, &code, &short_name)}, false).await?;
+            downloader.start(new_url.to_string(), &CrawlerData{base:CrawlerBase::new(self.base.year, &code, &short_name)}, false);
         }
 
         Ok(())
@@ -311,19 +311,15 @@ async fn main() -> Result<(), Box<dyn StdError>> {
         None,
         Vec::new()
     );
-    //let mut handles = Vec::new();
     for year in 2009..=2023{
         let china = AdminCode::china(year);
         let code = china.code.clone();
         let short_name = china.short_name.clone();
         download.args.push(china);
         let url = format!("https://www.stats.gov.cn/sj/tjbz/tjyqhdmhcxhfdm/{}/index.html", year);
-        //handles.push(
-            download.crawl(url, &CrawlerRoot{base: CrawlerBase::new(year, &code, &short_name)}, false)
-            .await?;
-        //);
+        download.start(url, &CrawlerRoot{base: CrawlerBase::new(year, &code, &short_name)}, false);
     }
-    //futures::future::join_all(handles).await;
+    download.wait().await?;
     println!("finish {}", download.args.len());
     let mut file = File::create("admin_code.csv")?;
     write!(file, "year,code,parent_code,short_code,name,short_name,city_type,town_type_code\n")?;

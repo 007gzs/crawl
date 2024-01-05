@@ -1,6 +1,7 @@
 use std::fs::File;  
 use std::io::{Write, Read}; 
 use bytes::Bytes;
+use tokio::task::JoinHandle;
 use std::fs;
 use std::error::Error as StdError;  
 use std::path::Path;
@@ -11,25 +12,26 @@ use tokio::time::sleep;
 
 #[async_trait]
 pub trait GetProxy {
-    async fn get_proxy(&self) -> Result<Option<reqwest::Proxy>, Box<dyn StdError>>;
+    async fn get_proxy(&self) -> Result<Option<reqwest::Proxy>, Box<dyn StdError + Send + Sync>>;
 }
 pub struct Downloader<T>
 {
-    pub root_path: String,
-    pub base_url: String,
-    pub get_proxy: Option<Box<dyn GetProxy>>,
-    pub args:T,
+    root_path: String,
+    base_url: String,
+    get_proxy: Option<Box<dyn GetProxy>>,
+    tasks: Vec<JoinHandle<Result<(), Box<dyn StdError + Send + Sync>>>>,
+    pub args:T
 }
 
 #[async_trait(?Send)]
 pub trait Crawler<T> {
-    async fn parse(&self, downloader:&mut Downloader<T>, url:String, data:Option<Bytes>) -> Result<(), Box<dyn StdError>>;
+    async fn parse(&self, downloader:&mut Downloader<T>, url:String, data:Option<Bytes>) -> Result<(), Box<dyn StdError + Send + Sync>>;
 }
 
-impl<T>  Downloader<T>
+impl<T: std::marker::Send>  Downloader<T>
 {
     pub fn new(root_path: String, base_url: String, get_proxy:Option<Box<dyn GetProxy>>, args:T) -> Downloader<T/*, ProxyCallback, ProxyFut */>{
-        Downloader{root_path: root_path, base_url: base_url, get_proxy: get_proxy, args:args}
+        Downloader{root_path: root_path, base_url: base_url, get_proxy: get_proxy, args:args, tasks:Vec::new()}
     }
     async fn get_proxy(&self) -> Result<Option<reqwest::Proxy>, Box<dyn StdError>>{
         match &self.get_proxy{
@@ -52,7 +54,7 @@ impl<T>  Downloader<T>
         Ok(body)
     }
     
-    async fn download(&self, url:String, force:bool) -> Result<Option<Bytes>, Box<dyn StdError>>{
+    async fn download(&self, url:String, force:bool) -> Result<Option<Bytes>, Box<dyn StdError + Send + Sync>>{
         if url.len() < self.base_url.len() || url[0..self.base_url.len()] != self.base_url{
             return Ok(None);
         }
@@ -91,10 +93,21 @@ impl<T>  Downloader<T>
         }
         Ok(None)
     }
-    pub async fn crawl(&mut self, url:String, callback: &dyn Crawler<T>, force:bool)-> Result<(), Box<dyn StdError>>
-    {
+    async fn crawl(&mut self, url:String, callback: &(dyn Crawler<T> + Send + Sync), force:bool)-> Result<(), Box<dyn StdError + Send + Sync>> {
         let data = self.download(url.clone(), force).await?;
         callback.parse(self, url, data).await?;
+        Ok(())
+    }
+    pub fn start(&mut self, url:String, callback: &(dyn Crawler<T> + Send + Sync), force:bool){
+        self.tasks.push(tokio::spawn(self.crawl(url, callback, force)));
+    }
+    pub async fn wait(&mut self)-> Result<(), Box<dyn StdError>>{
+        loop{
+            match self.tasks.pop(){
+                Some(handle) => handle.await?,
+                None => break
+            };
+        }
         Ok(())
     }
 
