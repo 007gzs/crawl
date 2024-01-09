@@ -82,6 +82,13 @@ fn name_to_short_name<'a>(name: &'a str, parent:&'a AdminCode, city_type:&CityTy
     short_name = rstrip(short_name, "村委会");
     short_name = rstrip(short_name, "居民委员会");
     short_name = rstrip(short_name, "居委会");
+    short_name = rstrip(short_name, "管理委员会");
+    short_name = rstrip(short_name, "管委会");
+    short_name = rstrip(short_name, "家属委员会");
+    short_name = rstrip(short_name, "家委会");
+    short_name = rstrip(short_name, "牧民委员会");
+    short_name = rstrip(short_name, "牧委会");
+    short_name = rstrip(short_name, "社区委员会");
     short_name = rstrip(short_name, "街道");
     short_name = rstrip(short_name, "社区");
     short_name = rstrip(short_name, "地区");
