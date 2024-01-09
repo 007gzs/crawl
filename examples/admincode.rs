@@ -41,6 +41,8 @@ struct AdminCode{
     short_code: String,
     name: String,
     short_name: String,
+    full_name: String,
+    full_short_name: String,
     city_type: CityType,
     town_type_code: String
 }
@@ -66,12 +68,9 @@ const MINGZU:[&str; 55] =  [
     "裕固族","京族","塔塔尔族","独龙族","鄂伦春族","赫哲族","门巴族","珞巴族","基诺族"
 ];
 
-fn name_to_short_name<'a>(name: &'a str, parent_short_name:&'a str, city_type:&CityType) -> &'a str{
-    if name == "中华人名共和国"{
-        return "中国";
-    }
+fn name_to_short_name<'a>(name: &'a str, parent:&'a AdminCode, city_type:&CityType) -> (&'a str, String){
     if vec!("市辖区", "省直辖县级行政区划", "自治区直辖县级行政区划", "县").contains(&name){
-        return parent_short_name;
+        return (&parent.short_name, parent.full_short_name.clone());
     }
     let mut short_name = name;
     short_name = rstrip(short_name, "自治县");
@@ -86,7 +85,7 @@ fn name_to_short_name<'a>(name: &'a str, parent_short_name:&'a str, city_type:&C
     short_name = rstrip(short_name, "街道");
     short_name = rstrip(short_name, "社区");
     short_name = rstrip(short_name, "地区");
-    if vec!(CityType::Province, CityType::City, CityType::Country).contains(city_type){
+    if vec!(CityType::Province, CityType::City, CityType::County).contains(city_type){
         short_name = rstrip(short_name, "省");
         short_name = rstrip(short_name, "市");
         if !short_name.ends_with("新区") && !short_name.ends_with("矿区"){
@@ -120,7 +119,15 @@ fn name_to_short_name<'a>(name: &'a str, parent_short_name:&'a str, city_type:&C
             break;
         }
     }
-    short_name
+    if short_name == parent.short_name{
+        return (&parent.short_name, parent.full_short_name.clone());
+    }
+    if parent.full_short_name == ""{
+        return (&short_name, short_name.to_string());
+    }
+    let  full_short_name = format!("{} {}", parent.full_short_name, short_name);
+    return (short_name, full_short_name);
+
 }
 impl AdminCode{
     fn new(
@@ -130,6 +137,8 @@ impl AdminCode{
         short_code: &str,
         name: &str,
         short_name: &str,
+        full_name: &str,
+        full_short_name: &str,
         city_type: CityType,
         town_type_code: &str
     ) -> AdminCode{
@@ -140,24 +149,39 @@ impl AdminCode{
             short_code: short_code.to_string(),
             name: name.to_string(),
             short_name: short_name.to_string(),
+            full_name: full_name.to_string(),
+            full_short_name: full_short_name.to_string(),
             city_type: city_type,
             town_type_code: town_type_code.to_string()
         }
     }
-    fn create(year: u16, code: &str, parent_code:&str, name: &str, parent_short_name:&str, city_type: CityType, town_type_code:&str) -> AdminCode{
+    fn create(year: u16, code: &str, name: &str, parent:&AdminCode, city_type: CityType, town_type_code:&str) -> AdminCode{
         let short_code = if code.len() >= 6{
             &code[0..6]
         }else{
             code
         };
-        let short_name = name_to_short_name(name, parent_short_name, &city_type);
-        AdminCode::new(year, code, parent_code, short_code, name, short_name, city_type, town_type_code)
+        let (short_name, full_short_name) = name_to_short_name(name, parent, &city_type);
+        let full_name ;
+        if parent.full_name == ""{
+            full_name = format!("{}", name);
+        }else{
+            full_name = format!("{} {}", parent.full_name, name);
+        }
+        AdminCode::new(year, code, &parent.code, short_code, name, short_name, &full_name, &full_short_name, city_type, town_type_code)
 
     }
     fn china(year: u16) -> AdminCode{
-        AdminCode::create(year, "000000000000","", "中华人名共和国", "", CityType::Country, "")
+        AdminCode::new(year, "000000000000","","000000", "中华人名共和国", "中国", "", "", CityType::Country, "")
     }
-
+    
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        let mut r = self.year.cmp(&other.year);
+        if r.is_eq() {
+            r = self.code.cmp(&other.code);
+        }
+        r
+    }
     
 }
 
@@ -200,7 +224,7 @@ fn parse_trs(data:&AdminCode, arg:&ResThreadArg<CrawlFlag>, manager: &Arc<Mutex<
             town_type_code = String::new();
             name = text;
         }
-        let admin_code = AdminCode::create(data.year, &code, &data.code, &name, &data.short_name, city_type.clone(), &town_type_code);
+        let admin_code = AdminCode::create(data.year, &code, &name, &data, city_type.clone(), &town_type_code);
         {
             let mut m = manager.lock().unwrap();
             m.datas.push(admin_code.clone());
@@ -252,7 +276,7 @@ fn parse_province(url: &str, d:&str, data:&AdminCode, arg:&ResThreadArg<CrawlFla
             Some((c, _)) => format!("{}0000000000", c).to_string(),
             None => String::new(),
         };
-        let admin_code = AdminCode::create(data.year, &code, &data.code, &name, &data.short_name, CityType::Province, "");
+        let admin_code = AdminCode::create(data.year, &code, &name, &data, CityType::Province, "");
         {
             let mut m = manager.lock().unwrap();
             m.datas.push(admin_code.clone());
@@ -319,22 +343,22 @@ fn main() -> anyhow::Result<()> {
             download.start_url(url, false, Arc::new(CrawlFlag::Province(china)))?;
         }
     }
-    for _ in 0..16{
+    for _ in 0..32{
         let res_arg = get_res_thread_arg(&download);
         let r = Arc::clone(&manager);
         thread::spawn(move || res_run(res_arg, r));
     }
-    start_crawl(&download, 16);
+    start_crawl(&download, 32);
     download.wait_finish();
     {
         let mut m = manager.lock().unwrap();
 
         println!("finish {}", m.datas.len());
         let mut file = File::create("admin_code.csv")?;
-        write!(file, "year,code,parent_code,short_code,name,short_name,city_type,town_type_code\n")?;
-        m.datas.sort_by_key(|x| (x.year, x.code.clone()));
+        write!(file, "year,code,parent_code,short_code,name,short_name,full_name,full_short_name,city_type,town_type_code\n")?;
+        m.datas.sort_by(|a,b| a.cmp(b));
         for item in m.datas.iter(){
-            write!(file, "{},{},{},{},{},{},{},{}\n", item.year, item.code, item.parent_code, item.short_code, item.name, item.short_name, item.city_type, item.town_type_code)?;
+            write!(file, "{},{},{},{},{},{},{},{},{},{}\n", item.year, item.code, item.parent_code, item.short_code, item.name, item.short_name, item.full_name, item.full_short_name, item.city_type, item.town_type_code)?;
         }
     }
     Ok(())
