@@ -1,8 +1,9 @@
 use std::fs::File;  
 use std::io::Write;
 use std::fmt::{self, Display, Formatter};
-use async_trait::async_trait;
-use crawl::downloader::{Downloader, GetProxy, Crawler};
+use std::sync::{Arc, Mutex};
+use std::thread;
+use crawl::downloader::{Downloader, get_res_thread_arg, start_crawl, ResThreadArg};
 use select::document::Document;
 use select::node::Node;
 use select::predicate::{Name, Class, Predicate};
@@ -31,6 +32,8 @@ impl Display for CityType {
         }  
     }  
 }
+
+#[derive(Clone)]
 struct AdminCode{
     year: u16,
     code: String,
@@ -40,6 +43,13 @@ struct AdminCode{
     short_name: String,
     city_type: CityType,
     town_type_code: String
+}
+struct Manager{
+    datas:Vec<AdminCode>
+}
+enum ScawlFlag{
+    Province(AdminCode),
+    Data(AdminCode)
 }
 fn rstrip<'a>(name: &'a str, end: &'a str) -> &'a str{
     if name.ends_with(end) && name.chars().count() - end.chars().count() >= 2{
@@ -150,28 +160,6 @@ impl AdminCode{
 
     
 }
-struct GetCnProxy{
-    proxy_url: String
-}
-#[async_trait]
-impl GetProxy for GetCnProxy{
-    async fn get_proxy(&self) -> anyhow::Result<Option<reqwest::Proxy>>{
-        let body = reqwest::get(self.proxy_url.clone()).await?.text().await?;
-        let proxy = reqwest::Proxy::http(format!("http://{}", body))?;
-        Ok(Some(proxy))
-    }
-}
-struct CrawlerBase{
-    year: u16,
-    parent_short_name: String,
-    parent_code: String,
-}
-struct CrawlerRoot{
-    base: CrawlerBase,
-}
-struct CrawlerData{
-    base: CrawlerBase,
-}
 
 fn get_text_href(node:Node)-> (String, Option<&str>){
     match node.find(Name("a")).next(){
@@ -179,57 +167,55 @@ fn get_text_href(node:Node)-> (String, Option<&str>){
         None=>(node.text(), None)
     }
 }
-impl CrawlerBase {
-    fn new(year:u16,parent_code: &str, parent_short_name:& str) -> CrawlerBase{
-        CrawlerBase{year: year, parent_code: parent_code.to_string(), parent_short_name:parent_short_name.to_string()}
-    }
-    async fn parse_trs(&self, downloader:&mut Downloader<Vec<AdminCode>>, base_url:&Url, doc:&Document, class_name:&str, city_type:CityType)-> Result<(), Box<dyn StdError>>{
+fn parse_trs(data:&AdminCode, arg:&ResThreadArg<ScawlFlag>, manager: &Arc<Mutex<Manager>>, base_url:&Url, doc:&Document, class_name:&str, city_type:CityType)-> anyhow::Result<()> {
 
-        for node in doc.find(Class(class_name)){
-            let mut tds = node.find(Name("td"));
-            let (code, href1) = match tds.next(){
-                None=>(String::new(), None),
-                Some(td)=>get_text_href(td)
-            };
-            let (text, href2) = match tds.next(){
-                None=>(String::new(), None),
-                Some(td)=>get_text_href(td)
-            };
-            let href = match href1{
-                Some(h)=>Some(h),
-                None=>href2
-            };
-            let town_type_code;
-            let name;
-            if city_type == CityType::Village{
-                match tds.next(){
-                    None=>{
-                        town_type_code = String::new();
-                        name = text;
-                    },
-                    Some(td)=>{
-                        town_type_code = text;
-                        name = td.text();
-                    }
+    for node in doc.find(Class(class_name)){
+        let mut tds = node.find(Name("td"));
+        let (code, href1) = match tds.next(){
+            None=>(String::new(), None),
+            Some(td)=>get_text_href(td)
+        };
+        let (text, href2) = match tds.next(){
+            None=>(String::new(), None),
+            Some(td)=>get_text_href(td)
+        };
+        let href = match href1{
+            Some(h)=>Some(h),
+            None=>href2
+        };
+        let town_type_code;
+        let name;
+        if city_type == CityType::Village{
+            match tds.next(){
+                None=>{
+                    town_type_code = String::new();
+                    name = text;
+                },
+                Some(td)=>{
+                    town_type_code = text;
+                    name = td.text();
                 }
-            }else{
-                town_type_code = String::new();
-                name = text;
             }
-            let admin_code = AdminCode::create(self.year, &code, &self.parent_code, &name, &self.parent_short_name,  city_type.clone(), &town_type_code);
-            let short_name = admin_code.short_name.clone();
-            downloader.args.push(admin_code);
-            match href{
-                None=>{},
-                Some(h)=>{
-                    let new_url = base_url.join(&h)?;
-                    downloader.start(new_url.to_string(), &mut CrawlerData{base:CrawlerBase::new(self.year, &code, &short_name)}, false);
-                }
+        }else{
+            town_type_code = String::new();
+            name = text;
+        }
+        let admin_code = AdminCode::create(data.year, &code, &data.code, &name, &data.short_name, city_type.clone(), &town_type_code);
+        {
+            let mut m = manager.lock().unwrap();
+            m.datas.push(admin_code.clone());
+        }
+        match href{
+            None=>{},
+            Some(h)=>{
+                let new_url = base_url.join(&h)?;
+                arg.start_url(new_url.to_string(), false, Arc::new(ScawlFlag::Data(admin_code)));
             }
         }
-        Ok(())
     }
+    Ok(())
 }
+
 fn decode_bytes(data:&Bytes) -> Option<String>{
     let (text, _, _) = GB18030.decode(data.as_ref());
     if text.contains("代码"){
@@ -243,87 +229,106 @@ fn decode_bytes(data:&Bytes) -> Option<String>{
     return None;
     
 }
-#[async_trait(?Send)]
-impl Crawler<Vec<AdminCode>> for CrawlerData{
-    async fn parse(&self, downloader:&mut Downloader<Vec<AdminCode>>, url:String, data:Option<Bytes>) -> Result<(), Box<dyn StdError>> {
-        let d;
-        match data {
-            Some(v) => match decode_bytes(&v){
-                Some(text) => d = text,
-                None => {
-                    downloader.start(url, self, true);
-                    return Ok(());
-                }
-            },
-            None => return Ok(()),
-        }
-        let doc = Document::from(d.as_str());
-        let base_url = Url::parse(url.as_str())?;
-        self.base.parse_trs(downloader, &base_url, &doc, "citytr", CityType::City).await?;
-        self.base.parse_trs(downloader, &base_url, &doc, "countytr", CityType::County).await?;
-        self.base.parse_trs(downloader, &base_url, &doc, "towntr", CityType::Town).await?;
-        self.base.parse_trs(downloader, &base_url, &doc, "villagetr", CityType::Village).await?;
-        Ok(())
-    }
-}
-#[async_trait(?Send)]
-impl Crawler<Vec<AdminCode>> for CrawlerRoot{
-    async fn parse(&self, downloader:&mut Downloader<Vec<AdminCode>>, url:String, data:Option<Bytes>) -> Result<(), Box<dyn StdError>> {
-        let d;
-        match data {
-            Some(v) => match decode_bytes(&v){
-                Some(text) => d = text,
-                None => {
-                    downloader.start(url, self, true);
-                    return Ok(());
-                }
-            },
-            None => return Ok(()),
-        }
-
-        let doc = Document::from(d.as_str());
-        let base_url = Url::parse(url.as_str())?;
-        for node in doc.find(Class("provincetr").descendant(Name("a"))){
-            let href = node.attr("href").unwrap();
-            let name = node.text();
-            let code = match href.split_once("."){
-                Some((c, _)) => format!("{}0000000000", c).to_string(),
-                None => String::new(),
-            };
-            let admin_code = AdminCode::create(self.base.year, &code, &self.base.parent_code, &name, &self.base.parent_short_name, CityType::Province, "");
-            let short_name = admin_code.short_name.clone();
-            downloader.args.push(admin_code);
-            let new_url = base_url.join(href)?;
-
-            downloader.start(new_url.to_string(), &CrawlerData{base:CrawlerBase::new(self.base.year, &code, &short_name)}, false);
-        }
-
-        Ok(())
-    }
+fn parse_data(url: &str, d:&str, data:&AdminCode, arg:&ResThreadArg<ScawlFlag>, manager: &Arc<Mutex<Manager>>) -> anyhow::Result<()> {
+    let doc = Document::from(d);
+    let base_url = Url::parse(url)?;
+    parse_trs(data, arg, manager, &base_url, &doc, "citytr", CityType::City);
+    parse_trs(data, arg, manager, &base_url, &doc, "countytr", CityType::County);
+    parse_trs(data, arg, manager, &base_url, &doc, "towntr", CityType::Town);
+    parse_trs(data, arg, manager, &base_url, &doc, "villagetr", CityType::Village);
+    Ok(())
 }
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn StdError>> {
-    let mut download = Downloader::new(
+
+fn parse_province(url: &str, d:&str, data:&AdminCode, arg:&ResThreadArg<ScawlFlag>, manager: &Arc<Mutex<Manager>>) -> anyhow::Result<()> {
+    
+
+    let doc = Document::from(d);
+    let base_url = Url::parse(url)?;
+    for node in doc.find(Class("provincetr").descendant(Name("a"))){
+        let href = node.attr("href").unwrap();
+        let name = node.text();
+        let code = match href.split_once("."){
+            Some((c, _)) => format!("{}0000000000", c).to_string(),
+            None => String::new(),
+        };
+        let admin_code = AdminCode::create(data.year, &code, &data.code, &name, &data.short_name, CityType::Province, "");
+        {
+            let mut m = manager.lock().unwrap();
+            m.datas.push(admin_code.clone());
+        }
+        let new_url = base_url.join(href)?;
+
+        arg.start_url(new_url.to_string(),  false, Arc::new(ScawlFlag::Data(admin_code)));
+    }
+
+    Ok(())
+}
+
+
+fn res_run(arg:ResThreadArg<ScawlFlag>, manager: Arc<Mutex<Manager>>){
+    loop {
+        match arg.get_msg(){
+            Ok(msg)=>{
+                let d;
+                match &msg.data {
+                    Ok(data) => match data{
+                        Some(v) => match decode_bytes(&v){
+                            Some(text) => d = text,
+                            None => {
+                                msg.retry(true);
+                                continue;
+                            }
+                        },
+                        None => continue,
+                    },
+                    Err(_) => {
+                        msg.retry(false);
+                        continue;
+                    }
+                }
+                let _ = match msg.flag{
+                    ScawlFlag::Province(data)=>parse_province(&msg.url, &d, &data, &arg, &manager),   
+                    ScawlFlag::Data(data)=>parse_data(&msg.url, &d, &data, &arg, &manager),
+                }
+            },
+            Err(_)=>{}
+        }
+    }
+
+}
+fn main() -> anyhow::Result<()> {
+    let download = Arc::new(Downloader::new(
         String::from(r"data"),
-        String::from("https://www.stats.gov.cn/sj/tjbz/tjyqhdmhcxhfdm/"),
-        None,
-        Vec::new()
-    );
-    for year in 2009..=2023{
-        let china = AdminCode::china(year);
-        let code = china.code.clone();
-        let short_name = china.short_name.clone();
-        download.args.push(china);
-        let url = format!("https://www.stats.gov.cn/sj/tjbz/tjyqhdmhcxhfdm/{}/index.html", year);
-        download.start(url, &CrawlerRoot{base: CrawlerBase::new(year, &code, &short_name)}, false);
+        String::from("https://www.stats.gov.cn/sj/tjbz/tjyqhdmhcxhfdm/")
+    ));
+    let manager = Arc::new(Mutex::new(Manager{datas:Vec::new()}));
+    {
+        let mut m: std::sync::MutexGuard<'_, Manager> = manager.lock().unwrap();
+
+        for year in 2009..=2023{
+            let china = AdminCode::china(year);
+            m.datas.push(china.clone());
+            let url = format!("https://www.stats.gov.cn/sj/tjbz/tjyqhdmhcxhfdm/{}/index.html", year);
+            download.start_url(url, false, Arc::new(ScawlFlag::Province(china)))?;
+        }
     }
-    download.wait().await?;
-    println!("finish {}", download.args.len());
-    let mut file = File::create("admin_code.csv")?;
-    write!(file, "year,code,parent_code,short_code,name,short_name,city_type,town_type_code\n")?;
-    for item in download.args.iter(){
-        write!(file, "{},{},{},{},{},{},{},{}\n", item.year, item.code, item.parent_code, item.short_code, item.name, item.short_name, item.city_type, item.town_type_code)?;
+    for _ in 0..16{
+        let res_arg = get_res_thread_arg(&download);
+        let r = Arc::clone(&manager);
+        thread::spawn(move || res_run(res_arg, r));
+    }
+    start_crawl(&download, 16);
+    download.wait_finish();
+    {
+        let m = manager.lock().unwrap();
+
+        println!("finish {}", m.datas.len());
+        let mut file = File::create("admin_code.csv")?;
+        write!(file, "year,code,parent_code,short_code,name,short_name,city_type,town_type_code\n")?;
+        for item in m.datas.iter(){
+            write!(file, "{},{},{},{},{},{},{},{}\n", item.year, item.code, item.parent_code, item.short_code, item.name, item.short_name, item.city_type, item.town_type_code)?;
+        }
     }
     Ok(())
 }

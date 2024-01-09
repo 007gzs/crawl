@@ -1,60 +1,118 @@
 use std::fs::File;  
-use std::io::{Write, Read}; 
+use std::io::{Write, Read};
+use std::sync::Arc; 
+use std::thread::{self, sleep};
+use std::time::Duration; 
 use bytes::Bytes;
-use tokio::task::JoinHandle;
 use std::fs;
 use anyhow;  
 use std::path::Path;
-use std::time::Duration;
-use async_trait::async_trait;
 use reqwest;
-use tokio::time::sleep;
+use flume::{Sender, Receiver};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
-#[async_trait(?Send)]
-pub trait GetProxy: Send + Sync + 'static  {
-    async fn get_proxy(&self) -> anyhow::Result<Option<reqwest::Proxy>>;
+struct ReqMessage<E>{
+    url:String,
+    force: bool,
+    flag: Arc<E>,
 }
-pub struct Downloader<T>
-{
-    root_path: String,
-    base_url: String,
-    get_proxy: Option<Box<dyn GetProxy>>,
-    tasks: Vec<JoinHandle<anyhow::Result<()>>>,
-    pub args:T
+pub struct ResMessage<E>{
+    pub url:String,
+    pub data: anyhow::Result<Option<Bytes>>,
+    pub flag: Arc<E>,
+    downloader:Arc<Downloader<E>>
 }
-
-#[async_trait(?Send)]
-pub trait Crawler<T>: Send + Sync + 'static  {
-    async fn parse(&self, downloader:&mut Downloader<T>, url:String, data:Option<Bytes>) -> anyhow::Result<()>;
-}
-
-impl<T: std::marker::Send + std::marker::Sync + 'static >  Downloader<T>
-{
-    pub fn new(root_path: String, base_url: String, get_proxy:Option<Box<dyn GetProxy>>, args:T) -> Downloader<T/*, ProxyCallback, ProxyFut */>{
-        Downloader{root_path: root_path, base_url: base_url, get_proxy: get_proxy, args:args, tasks:Vec::new()}
-    }
-    async fn get_proxy(&self) -> anyhow::Result<Option<reqwest::Proxy>>{
-        match &self.get_proxy{
-            None => Ok(None),
-            Some(t) => {
-                Ok(t.get_proxy().await?)
-            }
+impl<E> ReqMessage<E>{
+    fn gen_res(&self, data: anyhow::Result<Option<Bytes>>, downloader:&Arc<Downloader<E>>) -> ResMessage<E>{
+        ResMessage{
+            url: self.url.clone(),
+            data: data,
+            flag: Arc::clone(&self.flag),
+            downloader: Arc::clone(downloader),
         }
     }
-    async fn connect_real(&self, url:String, proxy:Option<reqwest::Proxy>) -> anyhow::Result<Bytes>{
-        let mut builder = reqwest::Client::builder();
+}
+impl<E> Drop for ResMessage<E>{
+    fn drop(&mut self){
+        self.downloader.parse_num.fetch_add(1, Ordering::Relaxed);
+        self.downloader.end_index.fetch_add(1, Ordering::Relaxed);
+    }
+}
+#[derive(Clone)]
+pub struct Downloader<E>{
+    root_path: String,
+    base_url: String,
+    start_index: Arc<AtomicUsize>,
+    end_index: Arc<AtomicUsize>,
+    download_num: Arc<AtomicUsize>,
+    connect_num: Arc<AtomicUsize>,
+    parse_num: Arc<AtomicUsize>,
+    req_sender:Sender<ReqMessage<E>>, 
+    req_receiver:Receiver<ReqMessage<E>>, 
+    res_sender:Sender<ResMessage<E>>, 
+    res_receiver:Receiver<ResMessage<E>>
+}
+
+struct ReqThreadArg<E>{
+    receiver:Receiver<ReqMessage<E>>, 
+    sender: Sender<ResMessage<E>>
+
+}
+pub struct ResThreadArg<E>{
+    receiver:Receiver<ResMessage<E>>, 
+    sender: Sender<ReqMessage<E>>,
+    downloader:Arc<Downloader<E>>
+}
+
+fn req_run<E: Send + Sync + 'static>(arg: ReqThreadArg<E>, downloader:Arc<Downloader<E>>){
+    loop{
+        match arg.receiver.recv() {
+            Ok(msg) => {
+                downloader.start_index.fetch_add(1, Ordering::Relaxed);
+                let data = downloader.download(msg.url.clone(), msg.force);
+                downloader.download_num.fetch_add(1, Ordering::Relaxed);
+                match arg.sender.send(msg.gen_res(data, &downloader)){
+                    Ok(_)=>{},
+                    Err(_)=>{}
+                };
+                downloader.end_index.fetch_add(1, Ordering::Relaxed);
+            },
+            Err(_) => {},
+        }
+    }
+}
+
+impl<E: Send + Sync + 'static>  Downloader<E>
+{
+    pub fn new(root_path: String, base_url: String) -> Downloader<E>{
+        let (req_sender, req_receiver) = flume::unbounded();
+        let (res_sender, res_receiver) = flume::unbounded();
+        Downloader{
+            root_path: root_path,
+            base_url: base_url,
+            start_index:Arc::new(AtomicUsize::new(0)),
+            end_index:Arc::new(AtomicUsize::new(0)),
+            download_num:Arc::new(AtomicUsize::new(0)),
+            connect_num:Arc::new(AtomicUsize::new(0)),
+            parse_num:Arc::new(AtomicUsize::new(0)),
+            req_sender: req_sender,
+            req_receiver: req_receiver,
+            res_sender:res_sender,
+            res_receiver: res_receiver,
+        }
+    }
+    fn connect_real(&self, url:String, proxy:Option<reqwest::Proxy>) -> anyhow::Result<Bytes>{
+        let mut builder = reqwest::blocking::Client::builder();
         match proxy {
             Some(p)=>{
                 builder = builder.proxy(p);
             },
             None=>{}
         }
-        let res = builder.build()?.get(url).send().await?;
-        let body = res.bytes().await?;
-        Ok(body)
+        Ok(builder.build()?.get(url).send()?.bytes()?)
     }
     
-    async fn download(&self, url:String, force:bool) -> anyhow::Result<Option<Bytes>>{
+    fn download(&self, url:String, force:bool) -> anyhow::Result<Option<Bytes>>{
         if url.len() < self.base_url.len() || url[0..self.base_url.len()] != self.base_url{
             return Ok(None);
         }
@@ -75,40 +133,62 @@ impl<T: std::marker::Send + std::marker::Sync + 'static >  Downloader<T>
             }
         }
 
-        for retry in 0..5 {
-            let proxy = match self.get_proxy().await {
-                Ok(p) => p,
-                Err(_) => None
-            };
-            match self.connect_real(url.clone(), proxy).await{
-                Ok(body) => {
-                    let mut file = File::create(path)?;
-                    for chunk in body.chunks(4096){
-                        file.write(chunk)?;
-                    }
-                    return Ok(Some(body));
-                },
-                Err(_) => {println!("error {} {}", retry, url); sleep(Duration::from_secs(1)).await;}
-            };
+        let body = self.connect_real(url.clone(), None)?;
+        self.connect_num.fetch_add(1, Ordering::Relaxed);
+        let mut file = File::create(path)?;
+        for chunk in body.chunks(4096){
+            file.write(chunk)?;
         }
-        Ok(None)
+        Ok(Some(body))
     }
-    async fn crawl(&mut self, url:String, callback: &(dyn Crawler<T> + Send + Sync), force:bool)-> anyhow::Result<()> {
-        let data = self.download(url.clone(), force).await?;
-        callback.parse(self, url, data).await?;
+    pub fn wait_finish(&self){
+        loop{
+            sleep(Duration::from_secs(1));
+            let end_index = self.end_index.load(Ordering::Relaxed);
+            if !self.req_sender.is_empty() || !self.res_sender.is_empty(){
+                continue
+            }
+            if self.start_index.load(Ordering::Relaxed) == end_index{
+                break
+            }
+        }
+    }
+    pub fn start_url(&self, url:String, force:bool, url_flag: Arc<E>)-> anyhow::Result<()>{
+        let msg = ReqMessage{url: url, force: force, flag: url_flag};
+        self.req_sender.send(msg)?;
         Ok(())
     }
-    pub fn start(&mut self, url:String, callback: &(dyn Crawler<T> + Send + Sync), force:bool){
-        self.tasks.push(tokio::spawn(self.crawl(url, callback, force)));
+}
+
+impl<E: Send + Sync + 'static> ResMessage<E>{
+    pub fn retry(&self, force:bool)-> anyhow::Result<()>{
+        self.downloader.start_url(self.url.clone(), force, Arc::clone(&self.flag))
     }
-    pub async fn wait(&mut self)-> anyhow::Result<()>{
-        loop{
-            match self.tasks.pop(){
-                Some(handle) => handle.await?,
-                None => break
-            };
-        }
+}
+pub fn start_crawl<E:Send + Sync + 'static>(downloader:&Arc<Downloader<E>>, thread_num:u16){
+    for _ in 0..thread_num {
+        let d = Arc::clone(&downloader);
+        let t = ReqThreadArg{receiver: downloader.req_receiver.clone(), sender: downloader.res_sender.clone()};
+        thread::spawn(move || req_run(t, d));
+    }
+}
+
+pub fn get_res_thread_arg<E>(downloader: &Arc<Downloader<E>>) -> ResThreadArg<E>{
+    let sender: Sender<ReqMessage<E>> = downloader.req_sender.clone();
+    let receiver = downloader.res_receiver.clone();
+    ResThreadArg{receiver: receiver, sender: sender, downloader:Arc::clone(downloader)}
+}
+
+impl<E: Send + Sync + 'static > ResThreadArg<E>{
+    pub fn start_url(&self, url:String, force:bool, url_flag: Arc<E>)-> anyhow::Result<()>{
+        let msg = ReqMessage{url: url, force: force, flag: url_flag};
+        self.sender.send(msg)?;
         Ok(())
     }
 
+    pub fn get_msg(&self) -> anyhow::Result<ResMessage<E>>{
+        let msg = self.receiver.recv()?;
+        self.downloader.start_index.fetch_add(1, Ordering::Relaxed);
+        Ok(msg)
+    }
 }
