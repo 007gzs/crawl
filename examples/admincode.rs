@@ -47,7 +47,7 @@ struct AdminCode{
 struct Manager{
     datas:Vec<AdminCode>
 }
-enum ScawlFlag{
+enum CrawlFlag{
     Province(AdminCode),
     Data(AdminCode)
 }
@@ -167,7 +167,7 @@ fn get_text_href(node:Node)-> (String, Option<&str>){
         None=>(node.text(), None)
     }
 }
-fn parse_trs(data:&AdminCode, arg:&ResThreadArg<ScawlFlag>, manager: &Arc<Mutex<Manager>>, base_url:&Url, doc:&Document, class_name:&str, city_type:CityType)-> anyhow::Result<()> {
+fn parse_trs(data:&AdminCode, arg:&ResThreadArg<CrawlFlag>, manager: &Arc<Mutex<Manager>>, base_url:&Url, doc:&Document, class_name:&str, city_type:CityType)-> anyhow::Result<()> {
 
     for node in doc.find(Class(class_name)){
         let mut tds = node.find(Name("td"));
@@ -209,7 +209,7 @@ fn parse_trs(data:&AdminCode, arg:&ResThreadArg<ScawlFlag>, manager: &Arc<Mutex<
             None=>{},
             Some(h)=>{
                 let new_url = base_url.join(&h)?;
-                arg.start_url(new_url.to_string(), false, Arc::new(ScawlFlag::Data(admin_code)));
+                arg.start_url(new_url.to_string(), false, Arc::new(CrawlFlag::Data(admin_code)))?;
             }
         }
     }
@@ -229,18 +229,18 @@ fn decode_bytes(data:&Bytes) -> Option<String>{
     return None;
     
 }
-fn parse_data(url: &str, d:&str, data:&AdminCode, arg:&ResThreadArg<ScawlFlag>, manager: &Arc<Mutex<Manager>>) -> anyhow::Result<()> {
+fn parse_data(url: &str, d:&str, data:&AdminCode, arg:&ResThreadArg<CrawlFlag>, manager: &Arc<Mutex<Manager>>) -> anyhow::Result<()> {
     let doc = Document::from(d);
     let base_url = Url::parse(url)?;
-    parse_trs(data, arg, manager, &base_url, &doc, "citytr", CityType::City);
-    parse_trs(data, arg, manager, &base_url, &doc, "countytr", CityType::County);
-    parse_trs(data, arg, manager, &base_url, &doc, "towntr", CityType::Town);
-    parse_trs(data, arg, manager, &base_url, &doc, "villagetr", CityType::Village);
+    parse_trs(data, arg, manager, &base_url, &doc, "citytr", CityType::City)?;
+    parse_trs(data, arg, manager, &base_url, &doc, "countytr", CityType::County)?;
+    parse_trs(data, arg, manager, &base_url, &doc, "towntr", CityType::Town)?;
+    parse_trs(data, arg, manager, &base_url, &doc, "villagetr", CityType::Village)?;
     Ok(())
 }
 
 
-fn parse_province(url: &str, d:&str, data:&AdminCode, arg:&ResThreadArg<ScawlFlag>, manager: &Arc<Mutex<Manager>>) -> anyhow::Result<()> {
+fn parse_province(url: &str, d:&str, data:&AdminCode, arg:&ResThreadArg<CrawlFlag>, manager: &Arc<Mutex<Manager>>) -> anyhow::Result<()> {
     
 
     let doc = Document::from(d);
@@ -259,14 +259,14 @@ fn parse_province(url: &str, d:&str, data:&AdminCode, arg:&ResThreadArg<ScawlFla
         }
         let new_url = base_url.join(href)?;
 
-        arg.start_url(new_url.to_string(),  false, Arc::new(ScawlFlag::Data(admin_code)));
+        arg.start_url(new_url.to_string(),  false, Arc::new(CrawlFlag::Data(admin_code)))?;
     }
 
     Ok(())
 }
 
 
-fn res_run(arg:ResThreadArg<ScawlFlag>, manager: Arc<Mutex<Manager>>){
+fn res_run(arg:ResThreadArg<CrawlFlag>, manager: Arc<Mutex<Manager>>){
     loop {
         match arg.get_msg(){
             Ok(msg)=>{
@@ -276,21 +276,27 @@ fn res_run(arg:ResThreadArg<ScawlFlag>, manager: Arc<Mutex<Manager>>){
                         Some(v) => match decode_bytes(&v){
                             Some(text) => d = text,
                             None => {
-                                msg.retry(true);
+                                match msg.retry(true){
+                                    Ok(_) => {},
+                                    Err(_) => {},
+                                };
                                 continue;
                             }
                         },
                         None => continue,
                     },
                     Err(_) => {
-                        msg.retry(false);
+                        match msg.retry(false) {
+                            Ok(_) => {},
+                            Err(_) => {},
+                        };
                         continue;
                     }
                 }
-                let _ = match msg.flag{
-                    ScawlFlag::Province(data)=>parse_province(&msg.url, &d, &data, &arg, &manager),   
-                    ScawlFlag::Data(data)=>parse_data(&msg.url, &d, &data, &arg, &manager),
-                }
+                let _ = match msg.flag.as_ref(){
+                    CrawlFlag::Province(data)=>parse_province(&msg.url, &d, &data, &arg, &manager),
+                    CrawlFlag::Data(data)=>parse_data(&msg.url, &d, &data, &arg, &manager),
+                };
             },
             Err(_)=>{}
         }
@@ -310,7 +316,7 @@ fn main() -> anyhow::Result<()> {
             let china = AdminCode::china(year);
             m.datas.push(china.clone());
             let url = format!("https://www.stats.gov.cn/sj/tjbz/tjyqhdmhcxhfdm/{}/index.html", year);
-            download.start_url(url, false, Arc::new(ScawlFlag::Province(china)))?;
+            download.start_url(url, false, Arc::new(CrawlFlag::Province(china)))?;
         }
     }
     for _ in 0..16{
