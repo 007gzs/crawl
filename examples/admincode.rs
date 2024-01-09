@@ -327,11 +327,12 @@ fn main() -> anyhow::Result<()> {
     start_crawl(&download, 16);
     download.wait_finish();
     {
-        let m = manager.lock().unwrap();
+        let mut m = manager.lock().unwrap();
 
         println!("finish {}", m.datas.len());
         let mut file = File::create("admin_code.csv")?;
         write!(file, "year,code,parent_code,short_code,name,short_name,city_type,town_type_code\n")?;
+        m.datas.sort_by_key(|x| (x.year, x.code.clone()));
         for item in m.datas.iter(){
             write!(file, "{},{},{},{},{},{},{},{}\n", item.year, item.code, item.parent_code, item.short_code, item.name, item.short_name, item.city_type, item.town_type_code)?;
         }

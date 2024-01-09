@@ -9,9 +9,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use anyhow;
 
-enum Flag{
-    Page
-}
+
 struct Data{
     title: String,
     url: String,
@@ -34,7 +32,7 @@ fn decode_bytes(data:&Bytes) -> String{
     let (text, _, _) = UTF_8.decode(data.as_ref());
     text.into_owned()
 }
-fn parse(msg:ResMessage<Flag>,arg:&ResThreadArg<Flag>,manager: &Arc<Mutex<Manager>>) -> anyhow::Result<()>{
+fn parse(msg:ResMessage<Option<()>>,arg:&ResThreadArg<Option<()>>,manager: &Arc<Mutex<Manager>>) -> anyhow::Result<()>{
     let d;
     match &msg.data {
         Ok(data)=> match data{
@@ -66,7 +64,7 @@ fn parse(msg:ResMessage<Flag>,arg:&ResThreadArg<Flag>,manager: &Arc<Mutex<Manage
                     if !m.added_urls.contains(&new_url)
                     {
                         m.added_urls.insert(new_url.clone());
-                        arg.start_url(new_url, false, Arc::new(Flag::Page))?;
+                        arg.start_url(new_url, false, Arc::new(None))?;
                     }
                 }
             }
@@ -75,7 +73,7 @@ fn parse(msg:ResMessage<Flag>,arg:&ResThreadArg<Flag>,manager: &Arc<Mutex<Manage
     Ok(())
 }
 
-fn res_run(arg:ResThreadArg<Flag>, manager: Arc<Mutex<Manager>>){
+fn res_run(arg:ResThreadArg<Option<()>>, manager: Arc<Mutex<Manager>>){
     loop {
         match arg.get_msg(){
             Ok(msg)=>match parse(msg, &arg, &manager){
@@ -95,7 +93,7 @@ fn main() -> anyhow::Result<()> {
     ));
     let url = String::from("https://doc.rust-lang.org/book/index.html");
     let manager = Arc::new(Mutex::new(Manager{datas:Vec::new(), added_urls:HashSet::from([url.clone()])}));
-    download.start_url(url, false, Arc::new(Flag::Page))?;
+    download.start_url(url, false, Arc::new(None))?;
     for _ in 0..16{
         let res_arg = get_res_thread_arg(&download);
         let r = Arc::clone(&manager);
